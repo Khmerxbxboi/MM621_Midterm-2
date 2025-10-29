@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SE Asia Happiness — p5.js radial viz</title>
+  <style>
+    html, body { margin: 0; background: #0b1620; color: #e6f1ff; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    header { max-width: 1100px; margin: 24px auto 8px; padding: 0 16px; }
+    h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: 0.4px; }
+    p { margin: 6px 0; line-height: 1.5; color: #bcd3f0; }
+    a { color: #8ad1ff; }
+    .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+    .btn { background:#132235; border:1px solid #20364f; color:#e6f1ff; padding:6px 10px; border-radius:12px; cursor:pointer; font-size:14px; }
+    .btn[aria-pressed="true"]{ background:#1f3a5a; }
+    .legend { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px; font-size:14px; }
+    .swatch{ width:14px; height:14px; border-radius:3px; display:inline-block; }
+    main { max-width: 1100px; margin: 0 auto 40px; padding: 0 16px; }
+    canvas { display:block; margin: 0 auto; border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,0.35); }
+    footer{ max-width:1100px; margin:12px auto 40px; padding:0 16px; color:#8aa7cc; font-size:13px; }
+    .tip{ color:#9bc1ff; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>A World of Happiness — Southeast Asia (2019)</h1>
+    <p>This interactive radial chart uses the <em>World Happiness Report 2019</em> data to compare countries in Southeast Asia. Each country is a spoke; the stacked bar shows factor contributions (GDP, social support, life expectancy, freedom, generosity, corruption). The <strong>color runs red→green</strong> by overall happiness score. Hover to see exact values; click a segment to pin the tooltip. Use the buttons to switch views.</p>
+    <div class="controls">
+      <button id="radialBtn" class="btn" aria-pressed="true">Radial (stacked)</button>
+      <button id="barsBtn" class="btn" aria-pressed="false">Horizontal Bars</button>
+      <label class="btn" style="cursor:default">Sort:
+        <select id="sortSelect" class="btn" style="margin-left:6px;">
+          <option value="score" selected>By score</option>
+          <option value="alpha">A → Z</option>
+          <option value="mainland">Mainland first</option>
+          <option value="maritime">Maritime first</option>
+        </select>
+      </label>
+    </div>
+    <div class="legend" id="legend"></div>
+    <p class="tip">Tip: press <kbd>B</kbd> to toggle bar mode, <kbd>R</kbd> for radial, and scroll to resize the chart.</p>
+  </header>
+  <main>
+    <!-- p5.js canvas will be injected here -->
+  </main>
+  <footer>
+    Data source: World Happiness Report 2019. Put <code>2019.csv</code> in the same folder as this page. Original report and context via the UN Sustainable Development Solutions Network. (Your class site should also link the original dataset URL.)
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
+  <script>
+  // ======== CONFIG ========
+  const DATA_PATH = '2019.csv'; // Ensure this CSV is next to index.html
+  const COUNTRIES_SEA = [
+    // Mainland SEA
+    'Cambodia','Laos','Lao PDR','Lao People\'s Democratic Republic','Myanmar','Malaysia','Thailand','Vietnam',
+    // Maritime SEA
+    'Brunei','Brunei Darussalam','Indonesia','Philippines','Singapore','Timor-Leste','Timor Leste'
+  ];
+
+  const GROUP_MAINLAND = new Set(['Cambodia','Laos','Lao PDR','Lao People\'s Democratic Republic','Myanmar','Thailand','Vietnam','Malaysia']);
+
+  const FACTOR_KEYS = [
+    'GDP per capita',
+    'Social support',
+    'Healthy life expectancy',
+    'Freedom to make life choices',
+    'Generosity',
+    'Perceptions of corruption'
+  ];
+
+  const FACTOR_COLORS = [
+    '#f9d264','#f6a463','#ed6a5a','#70c1b3','#b388eb','#94a3b8' // tooltip-only palette
+  ];
+
+  // Red→Green scale for overall score
+  function scoreToColor(p5, score, minS, maxS){
+    const t = p5.constrain((score - minS)/(maxS - minS), 0, 1);
+    const c1 = p5.color(220,60,60); // red
+    const c2 = p5.color(30,185,90); // green
+    return p5.lerpColor(c1, c2, t);
+  }
+
+  // ======== GLOBALS ========
+  let table, rows = [], viewMode = 'radial';
+  let sortMode = 'score';
+  let pinned = null; // pinned country name for tooltip
+  let baseSize = 720; // canvas side; mouse wheel scales this
+
+  function preload(){
+    table = loadTable(DATA_PATH, 'csv', 'header');
+  }
+
+  function setup(){
+    const parent = document.querySelector('main');
+    const c = createCanvas(baseSize, baseSize);
+    c.parent(parent);
+    angleMode(RADIANS);
+    textFont('Inter, system-ui, sans-serif');
+    noLoop();
+
+    // Prepare data
+    const cnameCol = table.columns.find(c => /Country|region|name/i.test(c));
+    const scoreCol = table.columns.find(c => /Score|Happiness score|Ladder/i.test(c));
+
+    table.rows.forEach(r => {
+      const nameRaw = r.get(cnameCol).trim();
+      const isSEA = COUNTRIES_SEA.some(v => v.toLowerCase() === nameRaw.toLowerCase());
+      if(!isSEA) return;
+
+      const obj = {
+        name: nameRaw,
+        score: parseFloat(r.get(scoreCol)),
+        factors: {}
+      };
+      let sum = 0;
+      FACTOR_KEYS.forEach((k) => {
+        const col = table.columns.find(c => c.trim().toLowerCase() === k.toLowerCase());
+        const val = col ? parseFloat(r.get(col)) : 0;
+        obj.factors[k] = isFinite(val) ? val : 0;
+        sum += obj.factors[k];
+      });
+      obj.sumFactors = sum;
+      rows.push(obj);
+    });
+
+    // sort initial
+    sortRows();
+
+    // UI
+    document.getElementById('radialBtn').onclick = () => { viewMode = 'radial'; updateButtons(); redraw(); };
+    document.getElementById('barsBtn').onclick  = () => { viewMode = 'bars'; updateButtons(); redraw(); };
+    document.getElementById('sortSelect').onchange = (e) => { sortMode = e.target.value; sortRows(); redraw(); };
+
+    // Legend (for tooltip factor colors)
+    const leg = document.getElementById('legend');
+    leg.innerHTML = '<strong>Factors</strong>:';
+    FACTOR_KEYS.forEach((k,i)=>{
+      const span = document.createElement('span');
+      span.innerHTML = `<span class="swatch" style="background:${FACTOR_COLORS[i]}"></span> ${k}`;
+      leg.appendChild(span);
+    });
+  }
+
+  function windowResized(){
+    // keep square canvas but responsive; cap at 880
+    const w = Math.min(880, Math.max(560, window.innerWidth - 48));
+    baseSize = w;
+    resizeCanvas(baseSize, baseSize);
+    redraw();
+  }
+
+  function mouseWheel(e){
+    baseSize = constrain(baseSize - e.delta*0.2, 520, 1000);
+    resizeCanvas(baseSize, baseSize);
+    redraw();
+    return false;
+  }
+
+  function keyPressed(){
+    if(key === 'B' || key === 'b'){ viewMode = (viewMode==='bars'?'radial':'bars'); updateButtons(); redraw(); }
+    if(key === 'R' || key === 'r'){ viewMode = 'radial'; updateButtons(); redraw(); }
+    if(key === ' ' && hovered){ pinned = pinned ? null : hovered.name; redraw(); }
+  }
+
+  function updateButtons(){
+    document.getElementById('radialBtn').setAttribute('aria-pressed', String(viewMode==='radial'));
+    document.getElementById('barsBtn').setAttribute('aria-pressed', String(viewMode==='bars'));
+  }
+
+  function sortRows(){
+    if(sortMode==='alpha') rows.sort((a,b)=>a.name.localeCompare(b.name));
+    else if(sortMode==='mainland') rows.sort((a,b)=> (Number(GROUP_MAINLAND.has(b.name)) - Number(GROUP_MAINLAND.has(a.name))) || b.score - a.score);
+    else if(sortMode==='maritime') rows.sort((a,b)=> (Number(GROUP_MAINLAND.has(a.name)) - Number(GROUP_MAINLAND.has(b.name))) || b.score - a.score);
+    else rows.sort((a,b)=> b.score - a.score);
+  }
+
+  // ====== DRAW LOOP ======
+  let hovered = null;
+  function draw(){
+    clear();
+    background('#08111a');
+
+    if(rows.length===0){
+      push(); fill(220); textAlign(CENTER, CENTER); text('Waiting for CSV… Make sure 2019.csv is next to this page.', width/2, height/2); pop();
+      return;
+    }
+
+    hovered = null;
+    if(viewMode==='radial') drawRadial(); else drawBars();
+
+    drawTooltip();
+  }
+
+  function drawRadial(){
+    const cx = width/2, cy = height/2;
+    const n = rows.length;
+    const angleStep = TWO_PI / n;
+    const innerR = Math.min(width, height) * 0.23; // earth radius
+    const maxR = Math.min(width, height) * 0.45;   // outer radius limit
+
+    // find min/max score for color scale, and max sum for radial scale
+    const minS = Math.min(...rows.map(r=>r.score));
+    const maxS = Math.max(...rows.map(r=>r.score));
+    const maxSum = Math.max(...rows.map(r=>r.sumFactors));
+
+    // Earth circle for vibes
+    noStroke(); fill('#0e2440'); circle(cx, cy, innerR*2);
+
+    for(let i=0;i<n;i++){
+      const d = rows[i];
+      const a0 = -HALF_PI + i*angleStep; // start at top
+      const a1 = a0 + angleStep*0.9;     // small gap between bars
+
+      // total length for the country (normalized by maxSum)
+      const totalLen = map(d.sumFactors, 0, maxSum, 0, maxR - innerR);
+
+      // stacked segments (all same color by score, but segment boundaries visible)
+      const col = scoreToColor(this, d.score, minS, maxS);
+      const segs = FACTOR_KEYS.map(k=>d.factors[k]);
+      const segTotal = segs.reduce((a,b)=>a+b,0) || 1;
+      let r0 = innerR;
+      stroke(18,45,70); strokeWeight(1.2); fill(col);
+      for(let s=0;s<segs.length;s++){
+        const len = totalLen * (segs[s] / segTotal);
+        drawArcBar(cx, cy, r0, r0+len, a0, a1);
+        r0 += len;
+      }
+
+      // hit test
+      const mx = mouseX - cx, my = mouseY - cy, distM = Math.sqrt(mx*mx + my*my);
+      const angM = Math.atan2(my, mx);
+      const normAng = (angM < -HALF_PI) ? angM + TWO_PI : angM; // align with our start
+      const withinAngle = normAng >= a0-0.001 && normAng <= a1+0.001;
+      if(withinAngle && distM >= innerR && distM <= innerR + totalLen){ hovered = d; }
+
+      // label outside
+      const midA = (a0+a1)/2;
+      const labelR = r0 + 12;
+      const lx = cx + Math.cos(midA) * (labelR);
+      const ly = cy + Math.sin(midA) * (labelR);
+      push(); noStroke(); fill(200); textSize(11);
+      textAlign(midA>HALF_PI*0.5 && midA<HALF_PI*1.5 ? RIGHT : LEFT, CENTER);
+      text(d.name, lx, ly);
+      pop();
+    }
+
+    // Title in the middle
+    push();
+    fill(210); noStroke(); textAlign(CENTER, CENTER); textSize(16);
+    text('SE Asia Happiness (2019) — red→green by score', cx, cy);
+    pop();
+  }
+
+  function drawArcBar(cx, cy, rInner, rOuter, a0, a1){
+    // draw a ring sector between rInner and rOuter from a0..a1
+    beginShape();
+    for(let a=a0; a<=a1; a+= (a1-a0)/24){
+      vertex(cx + Math.cos(a)*rOuter, cy + Math.sin(a)*rOuter);
+    }
+    for(let a=a1; a>=a0; a-= (a1-a0)/24){
+      vertex(cx + Math.cos(a)*rInner, cy + Math.sin(a)*rInner);
+    }
+    endShape(CLOSE);
+  }
+
+  function drawBars(){
+    const margin = 28;
+    const barH = Math.min(28, (height - margin*2) / rows.length - 6);
+    const x0 = margin*2, x1 = width - margin*2;
+
+    const minS = Math.min(...rows.map(r=>r.score));
+    const maxS = Math.max(...rows.map(r=>r.score));
+
+    // find max of sumFactors for stacked length
+    const maxSum = Math.max(...rows.map(r=>r.sumFactors));
+
+    for(let i=0;i<rows.length;i++){
+      const d = rows[i];
+      const y = margin + i*(barH+6) + 8;
+      const totalW = map(d.sumFactors, 0, maxSum, 0, x1-x0);
+
+      // stacked rects (same color by score)
+      const col = scoreToColor(this, d.score, minS, maxS);
+      let acc = 0;
+      stroke(18,45,70); strokeWeight(1);
+      fill(col);
+      const segs = FACTOR_KEYS.map(k=>d.factors[k]);
+      const sum = segs.reduce((a,b)=>a+b,0) || 1;
+      for(let s=0;s<segs.length;s++){
+        const w = totalW * (segs[s]/sum);
+        rect(x0+acc, y, w, barH, 6);
+        acc += w;
+      }
+
+      // label + score
+      noStroke(); fill(220); textSize(12); textAlign(RIGHT, CENTER); text(d.name, x0-10, y+barH/2);
+      fill(180); textAlign(LEFT, CENTER); text(nfc(d.score,2), x0+acc+8, y+barH/2);
+
+      // hover
+      if(mouseX > x0 && mouseX < x0+totalW && mouseY>y && mouseY<y+barH){ hovered = d; }
+    }
+  }
+
+  function drawTooltip(){
+    const d = pinned ? rows.find(r=>r.name===pinned) : hovered;
+    if(!d) return;
+
+    const padding = 10;
+    const w = 280, h = 150;
+    const x = constrain(mouseX + 18, 12, width - w - 12);
+    const y = constrain(mouseY + 18, 12, height - h - 12);
+
+    // panel
+    noStroke(); fill(16,32,50, 235); rect(x, y, w, h, 12);
+    fill(240); textSize(14); textAlign(LEFT, TOP); text(d.name + ' — score ' + nfc(d.score,2), x+padding, y+padding);
+
+    // mini stacked bar with factor colors
+    const bx = x + padding; const by = y + 34; const bw = w - padding*2; const bh = 16;
+    const segs = FACTOR_KEYS.map(k=>d.factors[k]);
+    const sum = segs.reduce((a,b)=>a+b,0) || 1;
+    let acc=0;
+    stroke(8,18,30); strokeWeight(1);
+    for(let i=0;i<segs.length;i++){
+      fill(FACTOR_COLORS[i]);
+      const sw = bw * (segs[i]/sum);
+      rect(bx+acc, by, sw, bh, i===0?8:0, i===segs.length-1?8:0, i===segs.length-1?8:0, i===0?8:0);
+      acc += sw;
+    }
+
+    // factor list
+    let ty = by + bh + 10;
+    textSize(12); noStroke(); fill(200);
+    for(let i=0;i<FACTOR_KEYS.length;i++){
+      const k = FACTOR_KEYS[i];
+      fill(FACTOR_COLORS[i]); rect(x+padding, ty+3, 8, 8, 2);
+      fill(210); text(k + ': ' + nfc(d.factors[k],2), x+padding+12, ty);
+      ty += 16;
+    }
+  }
+
+  function mousePressed(){
+    if(hovered){ pinned = hovered.name; redraw(); }
+  }
+
+  function mouseClicked(){
+    if(!hovered) { pinned = null; redraw(); }
+  }
+  </script>
+</body>
+</html>
